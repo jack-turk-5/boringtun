@@ -265,7 +265,11 @@ mod tests {
                     #[cfg(target_os = "linux")]
                     use_multi_queue: true,
                     #[cfg(target_os = "linux")]
-                    uapi_fd: -1,
+                    uapi_fd: None,
+                    #[cfg(target_os = "linux")]
+                    tun_fd: None,
+                    udp4_fd: None,
+                    udp6_fd: None,
                 },
             )
         }
@@ -556,8 +560,7 @@ mod tests {
                 use_connected_socket: false,
                 #[cfg(target_os = "linux")]
                 use_multi_queue: true,
-                #[cfg(target_os = "linux")]
-                uapi_fd: -1,
+                ..Default::default()
             },
         );
 
@@ -714,8 +717,7 @@ mod tests {
                 use_connected_socket: false,
                 #[cfg(target_os = "linux")]
                 use_multi_queue: true,
-                #[cfg(target_os = "linux")]
-                uapi_fd: -1,
+                ..Default::default()
             },
         );
 

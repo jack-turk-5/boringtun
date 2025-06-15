@@ -4,6 +4,7 @@
 use super::Error;
 use libc::*;
 use std::io;
+use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 
 const TUNSETIFF: u64 = 0x4004_54ca;

@@ -525,7 +525,7 @@ impl Handshake {
         // compare in constant time, returning WrongKey on mismatch
         if self.params.peer_static_public.as_bytes()
                       .ct_eq(&peer_static_public_decrypted)
-                      .unwrap_u8() == 1 {
+                      .unwrap_u8() != 1 {
             return Err(WireGuardError::WrongKey);
         }
 

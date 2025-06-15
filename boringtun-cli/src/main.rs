@@ -94,7 +94,12 @@ fn main() {
     let background = !matches.is_present("foreground");
     // Convert UAPI FD to Option<RawFd>
     #[cfg(target_os = "linux")]
-    let uapi_fd = (uapi_fd >= 0).then(|| uapi_fd as RawFd);
+    let raw_uapi: i32 = matches
+        .value_of_t("uapi-fd")
+        .unwrap_or_else(|e| e.exit());
+    // Convert to Option<RawFd>
+    #[cfg(target_os = "linux")]
+    let uapi_fd: Option<RawFd> = (raw_uapi >= 0).then(|| raw_uapi as RawFd);
     let udp_fd: i32 = matches
             .value_of_t("udp-fd")
             .unwrap_or_else(|e| e.exit());

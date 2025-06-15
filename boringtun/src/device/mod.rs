@@ -119,6 +119,8 @@ pub struct DeviceHandle {
     /// If set, use this FD for UDP instead of calling open_listen_socket().
     pub udp4_fd: Option<RawFd>,
     pub udp6_fd: Option<RawFd>,
+    #[cfg(target_os = "linux")]
+    pub use_multi_queue: bool,
  }
 
 impl Default for DeviceConfig {
@@ -163,9 +165,6 @@ pub struct Device {
     mtu: AtomicUsize,
 
     rate_limiter: Option<Arc<RateLimiter>>,
-
-    #[cfg(target_os = "linux")]
-    uapi_fd: i32,
 }
 
 struct ThreadData {
@@ -246,7 +245,7 @@ impl DeviceHandle {
         #[cfg(not(target_os = "linux"))]
         let uapi_fd = -1;
         #[cfg(target_os = "linux")]
-        let uapi_fd = device.read().uapi_fd;
+        let uapi_fd = device.read().config.uapi_fd;
 
         loop {
             // The event loop keeps a read lock on the device, because we assume write access is rarely needed
@@ -267,7 +266,7 @@ impl DeviceHandle {
                         }
                     }
                     WaitResult::EoF(handler) => {
-                        if uapi_fd >= 0 && uapi_fd == handler.fd() {
+                        if uapi_fd >= Some(0) && uapi_fd == Some(handler.fd()) {
                             device_lock.trigger_exit();
                             return;
                         }
@@ -387,16 +386,17 @@ impl Device {
             cleanup_paths: Default::default(),
             mtu: AtomicUsize::new(mtu),
             rate_limiter: None,
-            #[cfg(target_os = "linux")]
-            uapi_fd: config.uapi_fd.unwrap_or(-1),
         };
         
         #[cfg(target_os = "linux")]
-        if uapi_fd >= 0 {
-            device.register_api_fd(config.uapi_fd.unwrap())?;
+        if let Some(fd) = config.uapi_fd {
+            // Use the passed‐in UAPI FD
+            device.register_api_fd(fd)?;
         } else {
+            // Bind a fresh UAPI socket
             device.register_api_handler()?;
         }
+        
 
         device.register_iface_handler(Arc::clone(&device.iface))?;
         device.register_notifiers()?;
