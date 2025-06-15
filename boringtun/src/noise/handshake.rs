@@ -13,6 +13,7 @@ use blake2::{Blake2s256, Blake2sMac, Digest};
 use chacha20poly1305::XChaCha20Poly1305;
 use rand_core::OsRng;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+use subtle::ConstantTimeEq;
 use std::convert::TryInto;
 use std::time::{Duration, SystemTime};
 
@@ -521,11 +522,12 @@ impl Handshake {
             &hash,
         )?;
 
-        ring::constant_time::verify_slices_are_equal(
-            self.params.peer_static_public.as_bytes(),
-            &peer_static_public_decrypted,
-        )
-        .map_err(|_| WireGuardError::WrongKey)?;
+        // compare in constant time, returning WrongKey on mismatch
+        if self.params.peer_static_public.as_bytes()
+                      .ct_eq(&peer_static_public_decrypted)
+                      .unwrap_u8() == 1 {
+            return Err(WireGuardError::WrongKey);
+        }
 
         // initiator.hash = HASH(initiator.hash || msg.encrypted_static)
         hash = b2s_hash(&hash, packet.encrypted_static);

@@ -96,6 +96,7 @@ dependencies = [
  "rand_core",
  "ring",
  "socket2",
+ "subtle",
  "thiserror",
  "tracing",
  "tracing-subscriber",
@@ -110,6 +111,7 @@ dependencies = [
  "boringtun",
  "clap 3.2.8",
  "daemonize",
+ "sd-listen-fds",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -162,9 +164,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.2.19"
+version = "1.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e3a13707ac958681c13b39b458c073d0d9bc8a22cb1b2f4c8e55eb72c13f362"
+checksum = "d487aa071b5f64da6f19a3e848e3578944b726ee5a4854b82172f02aa876bfdc"
 dependencies = [
  "shlex",
 ]
@@ -908,6 +910,12 @@ name = "scopeguard"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d29ab0c6d3fc0ee92fe66e2d99f700eab17a8d57d1c1d3b748380fb20baa78cd"
+
+[[package]]
+name = "sd-listen-fds"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bb51d45a99c1bafff550fd40ce1d2152917dc9908fb3090c283e3f058d39b3f"
 
 [[package]]
 name = "semver"

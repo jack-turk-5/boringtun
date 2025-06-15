@@ -25,6 +25,8 @@ pub mod tun;
 #[path = "tun_linux.rs"]
 pub mod tun;
 
+use std::os::fd::RawFd;
+use std::os::fd::FromRawFd;
 use std::collections::HashMap;
 use std::io::{self, Write as _};
 use std::mem::MaybeUninit;
@@ -114,6 +116,8 @@ pub struct DeviceConfig {
     pub use_multi_queue: bool,
     #[cfg(target_os = "linux")]
     pub uapi_fd: i32,
+    pub udp4_fd: Option<RawFd>,
+    pub udp6_fd: Option<RawFd>,
 }
 
 impl Default for DeviceConfig {
@@ -121,6 +125,8 @@ impl Default for DeviceConfig {
         DeviceConfig {
             n_threads: 4,
             use_connected_socket: true,
+            udp4_fd: None,
+            udp6_fd: None,
             #[cfg(target_os = "linux")]
             use_multi_queue: true,
             #[cfg(target_os = "linux")]
@@ -407,47 +413,73 @@ impl Device {
         Ok(device)
     }
 
+    // Binds the network facing interfaces
     fn open_listen_socket(&mut self, mut port: u16) -> Result<(), Error> {
-        // Binds the network facing interfaces
-        // First close any existing open socket, and remove them from the event loop
-        if let Some(s) = self.udp4.take() {
-            unsafe {
-                // This is safe because the event loop is not running yet
-                self.queue.clear_event_by_fd(s.as_raw_fd())
-            }
-        };
+        
+        // Pass in preexisting socket(s) if given
+        let mut got_fd = false;
 
-        if let Some(s) = self.udp6.take() {
-            unsafe { self.queue.clear_event_by_fd(s.as_raw_fd()) };
+        if let Some(fd) = self.config.udp4_fd {
+            let sock4 = unsafe { socket2::Socket::from_raw_fd(fd) };
+            sock4.set_nonblocking(true)?;
+            self.register_udp_handler(sock4.try_clone().unwrap())?;
+            self.udp4 = Some(sock4);
+            got_fd = true;
         }
 
+        if let Some(fd6) = self.config.udp6_fd {
+            let sock6 = unsafe { socket2::Socket::from_raw_fd(fd6) };
+            sock6.set_nonblocking(true)?;
+            self.register_udp_handler(sock6.try_clone().unwrap())?;
+            self.udp6 = Some(sock6);
+            got_fd = true;
+        }
+
+        if got_fd {
+            // Prefer the IPv4 socket for port, fallback to IPv6
+            let local_addr = if let Some(ref sock4) = self.udp4 {
+                sock4.local_addr()?
+            } else if let Some(ref sock6) = self.udp6 {
+                sock6.local_addr()?
+            } else {
+                // This should never happen if got_fd == true
+                return Err(Error::Bind("No socket available for port extraction".into()));
+            };
+            // Extract the port number
+            self.listen_port = local_addr.as_socket().unwrap().port();
+            return Ok(());
+        }
+
+        // No FD given → fall back to binding new sockets
         for peer in self.peers.values() {
             peer.lock().shutdown_endpoint();
         }
 
-        // Then open new sockets and bind to the port
+        // IPv4 bind
         let udp_sock4 = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         udp_sock4.set_reuse_address(true)?;
         udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
         udp_sock4.set_nonblocking(true)?;
 
+        // If port was zero, grab the ephemeral port
         if port == 0 {
-            // Random port was assigned
             port = udp_sock4.local_addr()?.as_socket().unwrap().port();
         }
 
+        // IPv6 bind on same port
         let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
         udp_sock6.set_reuse_address(true)?;
         udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
         udp_sock6.set_nonblocking(true)?;
 
+        // Register handlers & store sockets
         self.register_udp_handler(udp_sock4.try_clone().unwrap())?;
         self.register_udp_handler(udp_sock6.try_clone().unwrap())?;
         self.udp4 = Some(udp_sock4);
         self.udp6 = Some(udp_sock6);
 
+        // Set the listen_port and return
         self.listen_port = port;
-
         Ok(())
     }
 

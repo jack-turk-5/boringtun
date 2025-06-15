@@ -5,6 +5,7 @@ use boringtun::device::drop_privileges::drop_privileges;
 use boringtun::device::{DeviceConfig, DeviceHandle};
 use clap::{Arg, Command};
 use daemonize::Daemonize;
+use std::os::unix::io::RawFd; 
 use std::fs::File;
 use std::os::unix::net::UnixDatagram;
 use std::process::exit;
@@ -78,6 +79,11 @@ fn main() {
             Arg::new("disable-connected-udp")
                 .long("disable-connected-udp")
                 .help("Disable connected UDP sockets to each peer"),
+            Arg::new("udp-fd")
+                .long("udp-fd")
+                .env("WG_SOCKET_FD")
+                .help("File descriptor for an already-open UDP socket")
+                .default_value("-1"),
             #[cfg(target_os = "linux")]
             Arg::new("disable-multi-queue")
                 .long("disable-multi-queue")
@@ -88,6 +94,16 @@ fn main() {
     let background = !matches.is_present("foreground");
     #[cfg(target_os = "linux")]
     let uapi_fd: i32 = matches.value_of_t("uapi-fd").unwrap_or_else(|e| e.exit());
+    let udp_fd: i32 = matches
+            .value_of_t("udp-fd")
+            .unwrap_or_else(|e| e.exit());
+    // Convert to Option<RawFd>
+    let socket_fd: Option<RawFd> = if udp_fd >= 0 {
+        Some(udp_fd as RawFd)
+    } else {
+        None
+    };
+
     let tun_fd: isize = matches.value_of_t("tun-fd").unwrap_or_else(|e| e.exit());
     let mut tun_name = matches.value_of("INTERFACE_NAME").unwrap();
     if tun_fd >= 0 {
@@ -151,6 +167,8 @@ fn main() {
         use_connected_socket: !matches.is_present("disable-connected-udp"),
         #[cfg(target_os = "linux")]
         use_multi_queue: !matches.is_present("disable-multi-queue"),
+        udp4_fd: socket_fd,
+        udp6_fd: socket_fd,
     };
 
     let mut device_handle: DeviceHandle = match DeviceHandle::new(tun_name, config) {

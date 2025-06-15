@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 struct wireguard_tunnel; // This corresponds to the Rust type
 
