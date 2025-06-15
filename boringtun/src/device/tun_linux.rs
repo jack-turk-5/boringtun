@@ -48,6 +48,12 @@ impl Drop for TunSocket {
     }
 }
 
+impl FromRawFd for TunSocket {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        TunSocket { fd, name: String::new() }
+    }
+}
+
 impl AsRawFd for TunSocket {
     fn as_raw_fd(&self) -> RawFd {
         self.fd
@@ -63,15 +69,6 @@ impl TunSocket {
     }
 
     pub fn new(name: &str) -> Result<TunSocket, Error> {
-        // If the provided name appears to be a FD, use that.
-        let provided_fd = name.parse::<i32>();
-        if let Ok(fd) = provided_fd {
-            return Ok(TunSocket {
-                fd,
-                name: name.to_string(),
-            });
-        }
-
         let fd = match unsafe { open(b"/dev/net/tun\0".as_ptr() as _, O_RDWR) } {
             -1 => return Err(Error::Socket(io::Error::last_os_error())),
             fd => fd,

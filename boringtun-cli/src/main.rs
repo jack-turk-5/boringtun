@@ -4,7 +4,7 @@
 use boringtun::device::drop_privileges::drop_privileges;
 use boringtun::device::{DeviceConfig, DeviceHandle};
 use clap::{Arg, Command};
-use daemonize::Daemonize;
+use daemonize::{Daemonize, Outcome};
 use std::os::unix::io::RawFd; 
 use std::fs::File;
 use std::os::unix::net::UnixDatagram;
@@ -92,23 +92,18 @@ fn main() {
         .get_matches();
 
     let background = !matches.is_present("foreground");
+    // Convert UAPI FD to Option<RawFd>
     #[cfg(target_os = "linux")]
-    let uapi_fd: i32 = matches.value_of_t("uapi-fd").unwrap_or_else(|e| e.exit());
+    let uapi_fd = (uapi_fd >= 0).then(|| uapi_fd as RawFd);
     let udp_fd: i32 = matches
             .value_of_t("udp-fd")
             .unwrap_or_else(|e| e.exit());
-    // Convert to Option<RawFd>
-    let socket_fd: Option<RawFd> = if udp_fd >= 0 {
-        Some(udp_fd as RawFd)
-    } else {
-        None
-    };
+    let socket_fd = (udp_fd >= 0).then(|| udp_fd as RawFd);
+
 
     let tun_fd: isize = matches.value_of_t("tun-fd").unwrap_or_else(|e| e.exit());
-    let mut tun_name = matches.value_of("INTERFACE_NAME").unwrap();
-    if tun_fd >= 0 {
-        tun_name = matches.value_of("tun-fd").unwrap();
-    }
+    let tun_name = matches.value_of("INTERFACE_NAME").unwrap();
+    let tun_fd = (tun_fd >= 0).then(|| tun_fd as RawFd);
     let n_threads: usize = matches.value_of_t("threads").unwrap_or_else(|e| e.exit());
     let log_level: Level = matches.value_of_t("verbosity").unwrap_or_else(|e| e.exit());
 
@@ -116,7 +111,17 @@ fn main() {
     let (sock1, sock2) = UnixDatagram::pair().unwrap();
     let _ = sock1.set_nonblocking(true);
 
-    let _guard;
+    let config = DeviceConfig {
+        n_threads,
+        use_connected_socket: !matches.is_present("disable-connected-udp"),
+        #[cfg(target_os = "linux")]
+        uapi_fd,
+        #[cfg(target_os = "linux")]
+        use_multi_queue: !matches.is_present("disable-multi-queue"),
+        tun_fd,
+        udp4_fd: socket_fd,
+        udp6_fd: socket_fd,
+     };
 
     if background {
         let log = matches.value_of("log").unwrap();
@@ -124,9 +129,7 @@ fn main() {
         let log_file =
             File::create(log).unwrap_or_else(|_| panic!("Could not create log file {}", log));
 
-        let (non_blocking, guard) = tracing_appender::non_blocking(log_file);
-
-        _guard = guard;
+        let (non_blocking, _guard) = tracing_appender::non_blocking(log_file);
 
         tracing_subscriber::fmt()
             .with_max_level(log_level)
@@ -134,66 +137,70 @@ fn main() {
             .with_ansi(false)
             .init();
 
-        let daemonize = Daemonize::new()
-            .working_directory("/tmp")
-            .exit_action(move || {
-                let mut b = [0u8; 1];
-                if sock2.recv(&mut b).is_ok() && b[0] == 1 {
-                    println!("BoringTun started successfully");
-                } else {
-                    eprintln!("BoringTun failed to start");
-                    exit(1);
-                };
-            });
+        match Daemonize::new()
+            .working_directory("/tmp").execute() {
+                Outcome::Parent(_) => {
+                    // Original parent: wait on sock2, then exit
+                    let mut buf = [0u8; 1];
+                    if sock2.recv(&mut buf).is_ok() && buf[0] == 1 {
+                        tracing::info!("BoringTun started successfully");
+                        exit(0);
+                    } else {
+                        tracing::error!("BoringTun failed to start");
+                        exit(1);
+                    }
+                }
+                Outcome::Child(_) => {
+                    // Daemonized child: drop privileges, init device, signal parent, wait
+                    if !matches.is_present("disable-drop-privileges") {
+                        if let Err(e) = drop_privileges() {
+                            tracing::error!("Failed to drop privileges: {:?}", e);
+                            let _ = sock1.send(&[0]);
+                            exit(1);
+                        }
+                    }
 
-        match daemonize.start() {
-            Ok(_) => tracing::info!("BoringTun started successfully"),
-            Err(e) => {
-                tracing::error!(error = ?e);
-                exit(1);
+                    let mut device_handle = DeviceHandle::new(tun_name, config)
+                        .unwrap_or_else(|e| {
+                            tracing::error!("Failed to initialize tunnel: {:?}", e);
+                            let _ = sock1.send(&[0]);
+                            exit(1);
+                        }
+                    );
+
+                    let _ = sock1.send(&[1]);
+                    tracing::info!("BoringTun started successfully (child)");
+                    device_handle.wait();
+                    return;
+                }
             }
-        }
-    } else {
-        tracing_subscriber::fmt()
-            .pretty()
-            .with_max_level(log_level)
-            .init();
-    }
+    } 
 
-    let config = DeviceConfig {
-        n_threads,
-        #[cfg(target_os = "linux")]
-        uapi_fd,
-        use_connected_socket: !matches.is_present("disable-connected-udp"),
-        #[cfg(target_os = "linux")]
-        use_multi_queue: !matches.is_present("disable-multi-queue"),
-        udp4_fd: socket_fd,
-        udp6_fd: socket_fd,
-    };
+    // Foreground logging
+    tracing_subscriber::fmt()
+        .pretty()
+        .with_max_level(log_level)
+        .init();
+    
 
-    let mut device_handle: DeviceHandle = match DeviceHandle::new(tun_name, config) {
-        Ok(d) => d,
-        Err(e) => {
-            // Notify parent that tunnel initialization failed
-            tracing::error!(message = "Failed to initialize tunnel", error=?e);
+    let mut handle = DeviceHandle::new(tun_name, config)
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to initialize tunnel: {:?}", e);
             sock1.send(&[0]).unwrap();
             exit(1);
         }
-    };
+    );
 
     if !matches.is_present("disable-drop-privileges") {
-        if let Err(e) = drop_privileges() {
-            tracing::error!(message = "Failed to drop privileges", error = ?e);
+        drop_privileges().unwrap_or_else(|e| {
+            tracing::error!("Failed to drop privileges: {:?}", e);
             sock1.send(&[0]).unwrap();
             exit(1);
-        }
+        });
     }
 
-    // Notify parent that tunnel initialization succeeded
-    sock1.send(&[1]).unwrap();
-    drop(sock1);
-
-    tracing::info!("BoringTun started successfully");
-
-    device_handle.wait();
+    // No parent to notify in foreground, just start
+    tracing::info!("BoringTun started successfully (foreground)");
+    handle.wait();
+    
 }

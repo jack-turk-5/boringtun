@@ -6,6 +6,7 @@ use libc::*;
 use std::io;
 use std::mem::size_of;
 use std::mem::size_of_val;
+use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::ptr::null_mut;
 
@@ -56,6 +57,12 @@ pub struct TunSocket {
 impl Drop for TunSocket {
     fn drop(&mut self) {
         unsafe { close(self.fd) };
+    }
+}
+
+impl FromRawFd for TunSocket {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        TunSocket { fd }
     }
 }
 

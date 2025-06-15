@@ -109,28 +109,30 @@ pub struct DeviceHandle {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct DeviceConfig {
+ pub struct DeviceConfig {
     pub n_threads: usize,
     pub use_connected_socket: bool,
     #[cfg(target_os = "linux")]
-    pub use_multi_queue: bool,
-    #[cfg(target_os = "linux")]
-    pub uapi_fd: i32,
+    pub uapi_fd: Option<RawFd>,
+    /// If set, use this FD instead of opening /dev/net/tun by name.
+    pub tun_fd: Option<RawFd>,
+    /// If set, use this FD for UDP instead of calling open_listen_socket().
     pub udp4_fd: Option<RawFd>,
     pub udp6_fd: Option<RawFd>,
-}
+ }
 
 impl Default for DeviceConfig {
     fn default() -> Self {
         DeviceConfig {
             n_threads: 4,
             use_connected_socket: true,
+            tun_fd: None,
             udp4_fd: None,
             udp6_fd: None,
             #[cfg(target_os = "linux")]
             use_multi_queue: true,
             #[cfg(target_os = "linux")]
-            uapi_fd: -1,
+            uapi_fd: None,
         }
     }
 }
@@ -359,18 +361,17 @@ impl Device {
     pub fn new(name: &str, config: DeviceConfig) -> Result<Device, Error> {
         let poll = EventPoll::<Handler>::new()?;
 
-        // Create a tunnel device
-        let iface = Arc::new(TunSocket::new(name)?.set_non_blocking()?);
+        // Create a tunnel device, either from passed-in FD or by name
+        let iface = if let Some(fd) = config.tun_fd {
+            unsafe { TunSocket::from_raw_fd(fd) }.set_non_blocking()?
+        } else {
+            TunSocket::new(name)?.set_non_blocking()?
+        };
         let mtu = iface.mtu()?;
-
-        #[cfg(not(target_os = "linux"))]
-        let uapi_fd = -1;
-        #[cfg(target_os = "linux")]
-        let uapi_fd = config.uapi_fd;
 
         let mut device = Device {
             queue: Arc::new(poll),
-            iface,
+            iface: iface.into(),
             config,
             exit_notice: Default::default(),
             yield_notice: Default::default(),
@@ -387,14 +388,16 @@ impl Device {
             mtu: AtomicUsize::new(mtu),
             rate_limiter: None,
             #[cfg(target_os = "linux")]
-            uapi_fd,
+            uapi_fd: config.uapi_fd.unwrap_or(-1),
         };
-
+        
+        #[cfg(target_os = "linux")]
         if uapi_fd >= 0 {
-            device.register_api_fd(uapi_fd)?;
+            device.register_api_fd(config.uapi_fd.unwrap())?;
         } else {
             device.register_api_handler()?;
         }
+
         device.register_iface_handler(Arc::clone(&device.iface))?;
         device.register_notifiers()?;
         device.register_timers()?;
