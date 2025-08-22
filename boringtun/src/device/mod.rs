@@ -427,25 +427,21 @@ impl Device {
         if !self.config.listen_fds.is_empty() && self.config.listen_fds[0] >= 0 {
             let mut assigned_port = 0;
             for &fd in &self.config.listen_fds {
-                let mut v6only: c_int = 0;
-                let mut len = std::mem::size_of::<c_int>() as socklen_t;
+                let mut addr: MaybeUninit<libc::sockaddr_storage> = MaybeUninit::uninit();
+                let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
                 let res = unsafe {
-                    getsockopt(
+                    libc::getsockname(
                         fd as c_int,
-                        IPPROTO_IPV6,
-                        IPV6_V6ONLY,
-                        &mut v6only as *mut _ as *mut c_void,
+                        addr.as_mut_ptr() as *mut libc::sockaddr,
                         &mut len,
                     )
                 };
 
-                let domain = if res == 0 {
-                    AF_INET6
-                } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOPROTOOPT) {
-                    AF_INET
-                } else {
+                if res != 0 {
                     return Err(Error::Bind(format!("Failed to determine socket family for fd {}: {}", fd, std::io::Error::last_os_error())));
-                };
+                }
+
+                let domain = unsafe { addr.assume_init().ss_family as c_int };
 
                 let socket = unsafe { socket2::Socket::from_raw_fd(fd as i32) };
                 socket.set_nonblocking(true)?;
@@ -470,7 +466,7 @@ impl Device {
                         if self.udp6.is_some() { return Err(Error::Bind("Multiple IPv6 sockets provided".to_string())); }
                         self.udp6 = Some(socket.try_clone()?);
                     },
-                    _ => unreachable!(), // We would have errored out before this
+                    _ => return Err(Error::Bind(format!("Unsupported socket family for fd {}", fd))),
                 }
                 self.register_udp_handler(socket)?;
             }
