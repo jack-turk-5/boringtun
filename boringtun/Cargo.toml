@@ -50,6 +50,7 @@ thiserror = { version = "1", optional = true }
 nix = { version = "0.25", default-features = false, features = [
     "time",
     "user",
+    "socket",
 ] }
 
 [dev-dependencies]

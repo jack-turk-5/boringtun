@@ -41,6 +41,7 @@ use crate::noise::rate_limiter::RateLimiter;
 use crate::noise::{Packet, Tunn, TunnResult};
 use crate::x25519;
 use allowed_ips::AllowedIps;
+use libc::{c_int, c_void, getsockopt, socklen_t, AF_INET, AF_INET6, SOCK_DGRAM, SOL_SOCKET, SO_TYPE};
 use parking_lot::Mutex;
 use peer::{AllowedIP, Peer};
 use poll::{EventPoll, EventRef, WaitResult};
@@ -426,16 +427,34 @@ impl Device {
         if !self.config.listen_fds.is_empty() && self.config.listen_fds[0] >= 0 {
             let mut assigned_port = 0;
             for &fd in &self.config.listen_fds {
+                let mut sock_type: c_int = 0;
+                let mut len = std::mem::size_of::<c_int>() as socklen_t;
+                let res = unsafe {
+                    getsockopt(
+                        fd as c_int,
+                        SOL_SOCKET,
+                        SO_TYPE,
+                        &mut sock_type as *mut _ as *mut c_void,
+                        &mut len,
+                    )
+                };
+                if res != 0 {
+                    return Err(Error::Bind(format!("Failed to get socket type: {}", std::io::Error::last_os_error())));
+                }
+                if sock_type != SOCK_DGRAM {
+                    return Err(Error::Bind("Socket is not a datagram socket".to_string()));
+                }
+
                 let socket = unsafe { socket2::Socket::from_raw_fd(fd as i32) };
                 socket.set_nonblocking(true)?;
 
                 let local_addr = socket.local_addr()?.as_socket()
-                    .ok_or_else(|| Error::Bind("Invalid socket family received from systemd".to_string()))?;
+                    .ok_or_else(|| Error::Bind("Invalid socket address".to_string()))?;
 
                 if assigned_port == 0 {
                     assigned_port = local_addr.port();
                 } else if assigned_port != local_addr.port() {
-                    return Err(Error::Bind("Sockets passed from systemd are not on the same port".to_string()));
+                    return Err(Error::Bind("Sockets are not on the same port".to_string()));
                 }
 
                 if local_addr.is_ipv4() {
