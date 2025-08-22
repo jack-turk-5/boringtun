@@ -440,28 +440,44 @@ impl Device {
 
                 if res != 0 {
                     let err = std::io::Error::last_os_error();
-                    tracing::error!("Failed to determine socket family for fd {}: {}", fd, err);
-                    return Err(Error::Bind(format!("Failed to determine socket family for fd {}: {}", fd, err)));
+                    tracing::error!("getsockname failed for fd {}: {}", fd, err);
+                    return Err(Error::Bind(format!("getsockname failed for fd {}: {}", fd, err)));
                 }
 
-                let domain = unsafe { addr.assume_init().ss_family as c_int };
+                let storage = unsafe { addr.assume_init() };
+                let domain = storage.ss_family as c_int;
                 tracing::debug!("fd {} has domain {}", fd, domain);
+
+                let port = match domain {
+                    AF_INET => {
+                        let sockaddr_in = unsafe { &*(addr.as_ptr() as *const libc::sockaddr_in) };
+                        u16::from_be(sockaddr_in.sin_port)
+                    }
+                    AF_INET6 => {
+                        let sockaddr_in6 = unsafe { &*(addr.as_ptr() as *const libc::sockaddr_in6) };
+                        u16::from_be(sockaddr_in6.sin6_port)
+                    }
+                    _ => {
+                        tracing::error!("Unsupported socket family {} for fd {}", domain, fd);
+                        return Err(Error::Bind(format!("Unsupported socket family for fd {}", fd)));
+                    }
+                };
+
+                if port == 0 {
+                    tracing::error!("Socket fd {} has an unspecified port (0)", fd);
+                    return Err(Error::Bind(format!("Socket fd {} has an unspecified port (0)", fd)));
+                }
+
+                if assigned_port == 0 {
+                    assigned_port = port;
+                    tracing::debug!("Determined listen port {} from fd {}", assigned_port, fd);
+                } else if assigned_port != port {
+                    tracing::error!("Socket fds have mismatched ports: {} and {}", assigned_port, port);
+                    return Err(Error::Bind("Provided socket fds have mismatched ports".to_string()));
+                }
 
                 let socket = unsafe { socket2::Socket::from_raw_fd(fd as i32) };
                 socket.set_nonblocking(true)?;
-
-                if assigned_port == 0 {
-                    if let Ok(addr) = socket.local_addr() {
-                         if let Some(sock_addr) = addr.as_socket() {
-                            assigned_port = sock_addr.port();
-                         }
-                    }
-                    if assigned_port == 0 {
-                        assigned_port = 51820; // Fallback
-                        tracing::warn!("Could not determine port for fd {}, falling back to {}", fd, assigned_port);
-                    }
-                }
-                tracing::debug!("Using port {} for fd {}", assigned_port, fd);
 
                 match domain {
                     AF_INET => {
@@ -472,7 +488,10 @@ impl Device {
                         if self.udp6.is_some() { return Err(Error::Bind("Multiple IPv6 sockets provided".to_string())); }
                         self.udp6 = Some(socket.try_clone()?);
                     },
-                    _ => return Err(Error::Bind(format!("Unsupported socket family for fd {}", fd))),
+                    _ => {
+                        // This is now redundant due to the check above, but safe to keep
+                        return Err(Error::Bind(format!("Unsupported socket family for fd {}", fd)))
+                    },
                 }
                 self.register_udp_handler(socket)?;
             }
