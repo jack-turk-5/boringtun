@@ -106,7 +106,7 @@ pub struct DeviceHandle {
     threads: Vec<JoinHandle<()>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DeviceConfig {
     pub n_threads: usize,
     pub use_connected_socket: bool,
