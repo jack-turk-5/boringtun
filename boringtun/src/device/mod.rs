@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::io::{self, Write as _};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -110,6 +110,7 @@ pub struct DeviceHandle {
 pub struct DeviceConfig {
     pub n_threads: usize,
     pub use_connected_socket: bool,
+    pub listen_fd: isize,
     #[cfg(target_os = "linux")]
     pub use_multi_queue: bool,
     #[cfg(target_os = "linux")]
@@ -121,6 +122,7 @@ impl Default for DeviceConfig {
         DeviceConfig {
             n_threads: 4,
             use_connected_socket: true,
+            listen_fd: -1,
             #[cfg(target_os = "linux")]
             use_multi_queue: true,
             #[cfg(target_os = "linux")]
@@ -170,7 +172,11 @@ impl DeviceHandle {
     pub fn new(name: &str, config: DeviceConfig) -> Result<DeviceHandle, Error> {
         let n_threads = config.n_threads;
         let mut wg_interface = Device::new(name, config)?;
-        wg_interface.open_listen_socket(0)?; // Start listening on a random port
+        if config.listen_fd < 0 {
+            wg_interface.open_listen_socket(0)?; // Start listening on a random port
+        } else {
+            wg_interface.open_listen_socket(config.listen_fd as u16)?;
+        }
 
         let interface_lock = Arc::new(Lock::new(wg_interface));
 
@@ -407,7 +413,7 @@ impl Device {
         Ok(device)
     }
 
-    fn open_listen_socket(&mut self, mut port: u16) -> Result<(), Error> {
+    fn open_listen_socket(&mut self, mut port_or_fd: u16) -> Result<(), Error> {
         // Binds the network facing interfaces
         // First close any existing open socket, and remove them from the event loop
         if let Some(s) = self.udp4.take() {
@@ -425,20 +431,36 @@ impl Device {
             peer.lock().shutdown_endpoint();
         }
 
+        if self.config.listen_fd >= 0 {
+            let socket = unsafe { socket2::Socket::from_raw_fd(self.config.listen_fd as i32) };
+            socket.set_nonblocking(true)?;
+            let local_addr = socket.local_addr()?.as_socket().unwrap();
+            self.listen_port = local_addr.port();
+            if local_addr.is_ipv4() {
+                self.udp4 = Some(socket.try_clone()?);
+                self.udp6 = None;
+            } else {
+                self.udp6 = Some(socket.try_clone()?);
+                self.udp4 = None;
+            }
+            self.register_udp_handler(socket)?;
+            return Ok(());
+        }
+
         // Then open new sockets and bind to the port
         let udp_sock4 = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         udp_sock4.set_reuse_address(true)?;
-        udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
+        udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port_or_fd).into())?;
         udp_sock4.set_nonblocking(true)?;
 
-        if port == 0 {
+        if port_or_fd == 0 {
             // Random port was assigned
-            port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            port_or_fd = udp_sock4.local_addr()?.as_socket().unwrap().port();
         }
 
         let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
         udp_sock6.set_reuse_address(true)?;
-        udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
+        udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port_or_fd, 0, 0).into())?;
         udp_sock6.set_nonblocking(true)?;
 
         self.register_udp_handler(udp_sock4.try_clone().unwrap())?;
@@ -446,7 +468,7 @@ impl Device {
         self.udp4 = Some(udp_sock4);
         self.udp6 = Some(udp_sock6);
 
-        self.listen_port = port;
+        self.listen_port = port_or_fd;
 
         Ok(())
     }
