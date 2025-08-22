@@ -81,7 +81,8 @@ fn main() {
             Arg::new("fd")
                 .takes_value(true)
                 .long("fd")
-                .help("File descriptor for the listening socket")
+                .multiple_occurrences(true)
+                .help("File descriptor for the listening socket(s)")
                 .default_value("-1"),
             #[cfg(target_os = "linux")]
             Arg::new("disable-multi-queue")
@@ -94,7 +95,9 @@ fn main() {
     #[cfg(target_os = "linux")]
     let uapi_fd: i32 = matches.value_of_t("uapi-fd").unwrap_or_else(|e| e.exit());
     let tun_fd: isize = matches.value_of_t("tun-fd").unwrap_or_else(|e| e.exit());
-    let listen_fd: isize = matches.value_of_t("fd").unwrap_or_else(|e| e.exit());
+    let listen_fds: Vec<isize> = matches
+        .values_of_t("fd")
+        .unwrap_or_else(|e| e.exit());
     let mut tun_name = matches.value_of("INTERFACE_NAME").unwrap();
     if tun_fd >= 0 {
         tun_name = matches.value_of("tun-fd").unwrap();
@@ -152,7 +155,7 @@ fn main() {
 
     let config = DeviceConfig {
         n_threads,
-        listen_fd: listen_fd as isize,
+        listen_fds,
         #[cfg(target_os = "linux")]
         uapi_fd,
         use_connected_socket: !matches.is_present("disable-connected-udp"),
