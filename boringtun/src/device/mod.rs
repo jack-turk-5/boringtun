@@ -427,6 +427,7 @@ impl Device {
         if !self.config.listen_fds.is_empty() && self.config.listen_fds[0] >= 0 {
             let mut assigned_port = 0;
             for &fd in &self.config.listen_fds {
+                tracing::debug!("Processing listen fd: {}", fd);
                 let mut addr: MaybeUninit<libc::sockaddr_storage> = MaybeUninit::uninit();
                 let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
                 let res = unsafe {
@@ -438,10 +439,13 @@ impl Device {
                 };
 
                 if res != 0 {
-                    return Err(Error::Bind(format!("Failed to determine socket family for fd {}: {}", fd, std::io::Error::last_os_error())));
+                    let err = std::io::Error::last_os_error();
+                    tracing::error!("Failed to determine socket family for fd {}: {}", fd, err);
+                    return Err(Error::Bind(format!("Failed to determine socket family for fd {}: {}", fd, err)));
                 }
 
                 let domain = unsafe { addr.assume_init().ss_family as c_int };
+                tracing::debug!("fd {} has domain {}", fd, domain);
 
                 let socket = unsafe { socket2::Socket::from_raw_fd(fd as i32) };
                 socket.set_nonblocking(true)?;
@@ -454,8 +458,10 @@ impl Device {
                     }
                     if assigned_port == 0 {
                         assigned_port = 51820; // Fallback
+                        tracing::warn!("Could not determine port for fd {}, falling back to {}", fd, assigned_port);
                     }
                 }
+                tracing::debug!("Using port {} for fd {}", assigned_port, fd);
 
                 match domain {
                     AF_INET => {
