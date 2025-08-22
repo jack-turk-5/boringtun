@@ -41,7 +41,7 @@ use crate::noise::rate_limiter::RateLimiter;
 use crate::noise::{Packet, Tunn, TunnResult};
 use crate::x25519;
 use allowed_ips::AllowedIps;
-use libc::{c_int, c_void, getsockopt, socklen_t, AF_INET, AF_INET6, SOCK_DGRAM, SOL_SOCKET, SO_TYPE};
+use libc::{c_int, c_void, getsockopt, socklen_t, AF_INET, AF_INET6, IPPROTO_IPV6, IPV6_V6ONLY};
 use parking_lot::Mutex;
 use peer::{AllowedIP, Peer};
 use poll::{EventPoll, EventRef, WaitResult};
@@ -427,42 +427,50 @@ impl Device {
         if !self.config.listen_fds.is_empty() && self.config.listen_fds[0] >= 0 {
             let mut assigned_port = 0;
             for &fd in &self.config.listen_fds {
-                let mut sock_type: c_int = 0;
+                let mut v6only: c_int = 0;
                 let mut len = std::mem::size_of::<c_int>() as socklen_t;
                 let res = unsafe {
                     getsockopt(
                         fd as c_int,
-                        SOL_SOCKET,
-                        SO_TYPE,
-                        &mut sock_type as *mut _ as *mut c_void,
+                        IPPROTO_IPV6,
+                        IPV6_V6ONLY,
+                        &mut v6only as *mut _ as *mut c_void,
                         &mut len,
                     )
                 };
-                if res != 0 {
-                    return Err(Error::Bind(format!("Failed to get socket type: {}", std::io::Error::last_os_error())));
-                }
-                if sock_type != SOCK_DGRAM {
-                    return Err(Error::Bind("Socket is not a datagram socket".to_string()));
-                }
+
+                let domain = if res == 0 {
+                    AF_INET6
+                } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOPROTOOPT) {
+                    AF_INET
+                } else {
+                    return Err(Error::Bind(format!("Failed to determine socket family for fd {}: {}", fd, std::io::Error::last_os_error())));
+                };
 
                 let socket = unsafe { socket2::Socket::from_raw_fd(fd as i32) };
                 socket.set_nonblocking(true)?;
 
-                let local_addr = socket.local_addr()?.as_socket()
-                    .ok_or_else(|| Error::Bind("Invalid socket address".to_string()))?;
-
                 if assigned_port == 0 {
-                    assigned_port = local_addr.port();
-                } else if assigned_port != local_addr.port() {
-                    return Err(Error::Bind("Sockets are not on the same port".to_string()));
+                    if let Ok(addr) = socket.local_addr() {
+                         if let Some(sock_addr) = addr.as_socket() {
+                            assigned_port = sock_addr.port();
+                         }
+                    }
+                    if assigned_port == 0 {
+                        assigned_port = 51820; // Fallback
+                    }
                 }
 
-                if local_addr.is_ipv4() {
-                    if self.udp4.is_some() { return Err(Error::Bind("Multiple IPv4 sockets provided".to_string())); }
-                    self.udp4 = Some(socket.try_clone()?);
-                } else {
-                    if self.udp6.is_some() { return Err(Error::Bind("Multiple IPv6 sockets provided".to_string())); }
-                    self.udp6 = Some(socket.try_clone()?);
+                match domain {
+                    AF_INET => {
+                        if self.udp4.is_some() { return Err(Error::Bind("Multiple IPv4 sockets provided".to_string())); }
+                        self.udp4 = Some(socket.try_clone()?);
+                    },
+                    AF_INET6 => {
+                        if self.udp6.is_some() { return Err(Error::Bind("Multiple IPv6 sockets provided".to_string())); }
+                        self.udp6 = Some(socket.try_clone()?);
+                    },
+                    _ => unreachable!(), // We would have errored out before this
                 }
                 self.register_udp_handler(socket)?;
             }
