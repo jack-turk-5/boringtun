@@ -413,7 +413,7 @@ impl Device {
         Ok(device)
     }
 
-    fn open_listen_socket(&mut self, mut port_or_fd: u16) -> Result<(), Error> {
+    fn open_listen_socket(&mut self, mut port: u16) -> Result<(), Error> {
         // Binds the network facing interfaces
         // First close any existing open socket, and remove them from the event loop
         if let Some(s) = self.udp4.take() {
@@ -434,33 +434,38 @@ impl Device {
         if self.config.listen_fd >= 0 {
             let socket = unsafe { socket2::Socket::from_raw_fd(self.config.listen_fd as i32) };
             socket.set_nonblocking(true)?;
-            let local_addr = socket.local_addr()?.as_socket().unwrap();
+
+            // Systemd gives us a single dual-stack socket. We need to use it for both IPv4 and IPv6 handlers.
+            let local_addr = socket.local_addr()?.as_socket()
+                .ok_or_else(|| Error::Bind("Invalid socket family received from systemd".to_string()))?;
             self.listen_port = local_addr.port();
-            if local_addr.is_ipv4() {
-                self.udp4 = Some(socket.try_clone()?);
-                self.udp6 = None;
-            } else {
-                self.udp6 = Some(socket.try_clone()?);
-                self.udp4 = None;
-            }
-            self.register_udp_handler(socket)?;
+
+            let socket_clone = socket.try_clone()?;
+
+            // Since it's a dual-stack IPv6 socket, we'll treat it as the primary for both
+            self.udp6 = Some(socket);
+            self.udp4 = Some(socket_clone);
+
+            // Register only one of the FDs, as they point to the same kernel description
+            self.register_udp_handler(self.udp6.as_ref().unwrap().try_clone()?)?;
+
             return Ok(());
         }
 
         // Then open new sockets and bind to the port
         let udp_sock4 = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         udp_sock4.set_reuse_address(true)?;
-        udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port_or_fd).into())?;
+        udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
         udp_sock4.set_nonblocking(true)?;
 
-        if port_or_fd == 0 {
+        if port == 0 {
             // Random port was assigned
-            port_or_fd = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            port = udp_sock4.local_addr()?.as_socket().unwrap().port();
         }
 
         let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
         udp_sock6.set_reuse_address(true)?;
-        udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port_or_fd, 0, 0).into())?;
+        udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
         udp_sock6.set_nonblocking(true)?;
 
         self.register_udp_handler(udp_sock4.try_clone().unwrap())?;
@@ -468,7 +473,7 @@ impl Device {
         self.udp4 = Some(udp_sock4);
         self.udp6 = Some(udp_sock6);
 
-        self.listen_port = port_or_fd;
+        self.listen_port = port;
 
         Ok(())
     }
