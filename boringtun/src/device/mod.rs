@@ -41,7 +41,7 @@ use crate::noise::rate_limiter::RateLimiter;
 use crate::noise::{Packet, Tunn, TunnResult};
 use crate::x25519;
 use allowed_ips::AllowedIps;
-use libc::{c_int, c_void, getsockopt, socklen_t, AF_INET, AF_INET6, IPPROTO_IPV6, IPV6_V6ONLY};
+use libc::{c_int, AF_INET, AF_INET6, AF_UNIX};
 use parking_lot::Mutex;
 use peer::{AllowedIP, Peer};
 use poll::{EventPoll, EventRef, WaitResult};
@@ -456,6 +456,10 @@ impl Device {
                     AF_INET6 => {
                         let sockaddr_in6 = unsafe { &*(addr.as_ptr() as *const libc::sockaddr_in6) };
                         u16::from_be(sockaddr_in6.sin6_port)
+                    }
+                    AF_UNIX => {
+                        tracing::error!("Unsupported socket family AF_UNIX for fd {}: WireGuard requires an internet socket (UDPv4 or UDPv6)", fd);
+                        return Err(Error::Bind(format!("Unsupported socket family AF_UNIX for fd {}", fd)));
                     }
                     _ => {
                         tracing::error!("Unsupported socket family {} for fd {}", domain, fd);
