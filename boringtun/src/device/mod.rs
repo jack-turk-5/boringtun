@@ -617,10 +617,16 @@ impl Device {
             udp.as_raw_fd(),
             Box::new(move |d, t| {
                 // Handler that handles anonymous packets over UDP
-                let mut iter = MAX_ITR;
-                let (private_key, public_key) = d.key_pair.as_ref().expect("Key not set");
+                let (private_key, public_key) = match d.key_pair.as_ref() {
+                    Some(pair) => pair,
+                    None => return Action::Continue, // Not configured yet, drop packet
+                };
+                let rate_limiter = match d.rate_limiter.as_ref() {
+                    Some(limiter) => limiter,
+                    None => return Action::Continue, // Not configured yet, drop packet
+                };
 
-                let rate_limiter = d.rate_limiter.as_ref().unwrap();
+                let mut iter = MAX_ITR;
 
                 // Loop while we have packets on the anonymous connection
 
