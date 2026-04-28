@@ -165,7 +165,7 @@ impl RateLimiter {
             let (mac1, mac2) = macs.split_at(16);
 
             let computed_mac1 = b2s_keyed_mac_16(&self.mac1_key, msg);
-            if !crate::noise::constant_time_eq(&computed_mac1[..16], mac1) {
+            if subtle::ConstantTimeEq::ct_eq(&computed_mac1[..16], mac1).unwrap_u8() != 1 {
                 return Err(TunnResult::Err(WireGuardError::InvalidMac));
             }
 
@@ -179,7 +179,7 @@ impl RateLimiter {
                 let cookie = self.current_cookie(addr);
                 let computed_mac2 = b2s_keyed_mac_16_2(&cookie, msg, mac1);
 
-                if !crate::noise::constant_time_eq(&computed_mac2[..16], mac2) {
+                if subtle::ConstantTimeEq::ct_eq(&computed_mac2[..16], mac2).unwrap_u8() != 1 {
                     let cookie_packet = self
                         .format_cookie_reply(sender_idx, cookie, mac1, dst)
                         .map_err(TunnResult::Err)?;

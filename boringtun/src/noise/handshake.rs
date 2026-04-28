@@ -521,10 +521,10 @@ impl Handshake {
             &hash,
         )?;
 
-        if !crate::noise::constant_time_eq(
-            self.params.peer_static_public.as_bytes(),
+        if subtle::ConstantTimeEq::ct_eq(
+            self.params.peer_static_public.as_bytes().as_slice(),
             &peer_static_public_decrypted,
-        ) {
+        ).unwrap_u8() != 1 {
             return Err(WireGuardError::WrongKey);
         }
 
