@@ -17,7 +17,8 @@ impl std::str::FromStr for KeyBytes {
             }
             43 | 44 => {
                 // Try to parse as base64
-                if let Ok(decoded_key) = base64::decode(s) {
+                use base64::{engine::general_purpose, Engine as _};
+                if let Ok(decoded_key) = general_purpose::STANDARD.decode(s) {
                     if decoded_key.len() == internal.len() {
                         internal[..].copy_from_slice(&decoded_key);
                     } else {

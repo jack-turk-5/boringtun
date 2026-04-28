@@ -41,6 +41,17 @@ const MAX_QUEUE_DEPTH: usize = 256;
 /// number of sessions in the ring, better keep a PoT
 const N_SESSIONS: usize = 8;
 
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut res = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        res |= x ^ y;
+    }
+    res == 0
+}
+
 #[derive(Debug)]
 pub enum TunnResult<'a> {
     Done,
@@ -125,7 +136,7 @@ pub enum Packet<'a> {
 
 impl Tunn {
     #[inline(always)]
-    pub fn parse_incoming_packet(src: &[u8]) -> Result<Packet, WireGuardError> {
+    pub fn parse_incoming_packet(src: &[u8]) -> Result<Packet<'_>, WireGuardError> {
         if src.len() < 4 {
             return Err(WireGuardError::InvalidPacket);
         }
