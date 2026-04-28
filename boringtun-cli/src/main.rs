@@ -59,6 +59,12 @@ fn main() {
                 .env("WG_UAPI_FD")
                 .help("File descriptor for the user API")
                 .default_value("-1"),
+            #[cfg(unix)]
+            Arg::new("udp-fd")
+                .long("udp-fd")
+                .env("WG_UDP_FD")
+                .help("File descriptor for the inherited UDP socket")
+                .default_value("-1"),
             Arg::new("tun-fd")
                 .long("tun-fd")
                 .env("WG_TUN_FD")
@@ -88,6 +94,8 @@ fn main() {
     let background = !matches.is_present("foreground");
     #[cfg(target_os = "linux")]
     let uapi_fd: i32 = matches.value_of_t("uapi-fd").unwrap_or_else(|e| e.exit());
+    #[cfg(unix)]
+    let udp_fd: i32 = matches.value_of_t("udp-fd").unwrap_or_else(|e| e.exit());
     let tun_fd: isize = matches.value_of_t("tun-fd").unwrap_or_else(|e| e.exit());
     let mut tun_name = matches.value_of("INTERFACE_NAME").unwrap();
     if tun_fd >= 0 {
@@ -146,6 +154,8 @@ fn main() {
 
     let config = DeviceConfig {
         n_threads,
+        #[cfg(unix)]
+        udp_fd,
         #[cfg(target_os = "linux")]
         uapi_fd,
         use_connected_socket: !matches.is_present("disable-connected-udp"),

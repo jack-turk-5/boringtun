@@ -262,6 +262,8 @@ mod tests {
                 DeviceConfig {
                     n_threads: 2,
                     use_connected_socket: true,
+                    #[cfg(unix)]
+                    udp_fd: -1,
                     #[cfg(target_os = "linux")]
                     use_multi_queue: true,
                     #[cfg(target_os = "linux")]
@@ -554,6 +556,8 @@ mod tests {
             DeviceConfig {
                 n_threads: 2,
                 use_connected_socket: false,
+                #[cfg(unix)]
+                udp_fd: -1,
                 #[cfg(target_os = "linux")]
                 use_multi_queue: true,
                 #[cfg(target_os = "linux")]
@@ -712,6 +716,8 @@ mod tests {
             DeviceConfig {
                 n_threads: 2,
                 use_connected_socket: false,
+                #[cfg(unix)]
+                udp_fd: -1,
                 #[cfg(target_os = "linux")]
                 use_multi_queue: true,
                 #[cfg(target_os = "linux")]
@@ -845,5 +851,46 @@ mod tests {
         for t in threads {
             t.join().unwrap();
         }
+    }
+
+    /// Test socket activation with an inherited UDP file descriptor
+    #[test]
+    #[ignore]
+    #[cfg(unix)]
+    fn test_wg_socket_activation() {
+        use socket2::{Domain, Protocol, Type};
+        use std::os::unix::io::AsRawFd;
+        use std::net::SocketAddrV4;
+
+        let port = next_port();
+
+        // Create a UDP socket and bind it to a port
+        let udp_sock = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        udp_sock.bind(&SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port).into()).unwrap();
+
+        let fd = udp_sock.as_raw_fd();
+        let addr_v4 = next_ip();
+        let addr_v6 = next_ip_v6();
+
+        // Create device with the inherited fd
+        let mut wg = WGHandle::init_with_config(
+            addr_v4,
+            addr_v6,
+            DeviceConfig {
+                n_threads: 2,
+                use_connected_socket: true,
+                #[cfg(unix)]
+                udp_fd: fd,
+                #[cfg(target_os = "linux")]
+                use_multi_queue: true,
+                #[cfg(target_os = "linux")]
+                uapi_fd: -1,
+            },
+        );
+
+        // Verify the device is using the expected port
+        let response = wg.wg_get();
+        assert!(response.contains(&format!("listen_port={}", port)));
+        assert!(response.ends_with("errno=0\n\n"));
     }
 }

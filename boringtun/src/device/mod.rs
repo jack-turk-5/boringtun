@@ -110,6 +110,8 @@ pub struct DeviceHandle {
 pub struct DeviceConfig {
     pub n_threads: usize,
     pub use_connected_socket: bool,
+    #[cfg(unix)]
+    pub udp_fd: i32,
     #[cfg(target_os = "linux")]
     pub use_multi_queue: bool,
     #[cfg(target_os = "linux")]
@@ -121,6 +123,8 @@ impl Default for DeviceConfig {
         DeviceConfig {
             n_threads: 4,
             use_connected_socket: true,
+            #[cfg(unix)]
+            udp_fd: -1,
             #[cfg(target_os = "linux")]
             use_multi_queue: true,
             #[cfg(target_os = "linux")]
@@ -425,6 +429,31 @@ impl Device {
             peer.lock().shutdown_endpoint();
         }
 
+        // Socket activation: use inherited UDP fd if provided
+        #[cfg(unix)]
+        {
+            if self.config.udp_fd >= 0 {
+                let udp_sock = unsafe {
+                    use std::os::fd::FromRawFd;
+                    socket2::Socket::from_raw_fd(self.config.udp_fd)
+                };
+                udp_sock.set_nonblocking(true)?;
+                let local_addr = udp_sock.local_addr()?;
+                port = local_addr
+                    .as_socket()
+                    .ok_or_else(|| Error::GetSockName("Invalid socket address".to_string()))?
+                    .port();
+
+                self.register_udp_handler(udp_sock.try_clone().unwrap())?;
+                self.udp4 = Some(udp_sock);
+                // For IPv6, we would need a separate socket; for now assume the inherited socket works for both
+                self.udp6 = None;
+
+                self.listen_port = port;
+                return Ok(());
+            }
+        }
+
         // Then open new sockets and bind to the port
         let udp_sock4 = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         udp_sock4.set_reuse_address(true)?;
@@ -433,7 +462,11 @@ impl Device {
 
         if port == 0 {
             // Random port was assigned
-            port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            port = udp_sock4
+                .local_addr()?
+                .as_socket()
+                .ok_or_else(|| Error::GetSockName("Invalid socket address".to_string()))?
+                .port();
         }
 
         let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
