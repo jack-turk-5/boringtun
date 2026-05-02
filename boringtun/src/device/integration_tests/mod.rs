@@ -262,6 +262,7 @@ mod tests {
                 DeviceConfig {
                     n_threads: 2,
                     use_connected_socket: true,
+                    listen_port: None,
                     #[cfg(unix)]
                     udp_fd: -1,
                     #[cfg(target_os = "linux")]
@@ -556,6 +557,7 @@ mod tests {
             DeviceConfig {
                 n_threads: 2,
                 use_connected_socket: false,
+                listen_port: None,
                 #[cfg(unix)]
                 udp_fd: -1,
                 #[cfg(target_os = "linux")]
@@ -716,6 +718,7 @@ mod tests {
             DeviceConfig {
                 n_threads: 2,
                 use_connected_socket: false,
+                listen_port: None,
                 #[cfg(unix)]
                 udp_fd: -1,
                 #[cfg(target_os = "linux")]
@@ -879,6 +882,7 @@ mod tests {
             DeviceConfig {
                 n_threads: 2,
                 use_connected_socket: true,
+                listen_port: None,
                 #[cfg(unix)]
                 udp_fd: fd,
                 #[cfg(target_os = "linux")]

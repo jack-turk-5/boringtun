@@ -110,6 +110,7 @@ pub struct DeviceHandle {
 pub struct DeviceConfig {
     pub n_threads: usize,
     pub use_connected_socket: bool,
+    pub listen_port: Option<u16>,
     #[cfg(unix)]
     pub udp_fd: i32,
     #[cfg(target_os = "linux")]
@@ -123,6 +124,7 @@ impl Default for DeviceConfig {
         DeviceConfig {
             n_threads: 4,
             use_connected_socket: true,
+            listen_port: None,
             #[cfg(unix)]
             udp_fd: -1,
             #[cfg(target_os = "linux")]
@@ -141,8 +143,8 @@ pub struct Device {
     fwmark: Option<u32>,
 
     iface: Arc<TunSocket>,
-    udp4: Option<socket2::Socket>,
-    udp6: Option<socket2::Socket>,
+    udp4: Option<Arc<socket2::Socket>>,
+    udp6: Option<Arc<socket2::Socket>>,
 
     yield_notice: Option<EventRef>,
     exit_notice: Option<EventRef>,
@@ -429,6 +431,11 @@ impl Device {
             peer.lock().shutdown_endpoint();
         }
 
+        // Prioritize explicit listen port from config
+        if let Some(explicit_port) = self.config.listen_port {
+            port = explicit_port;
+        }
+
         // Socket activation: use inherited UDP fd if provided
         #[cfg(unix)]
         {
@@ -438,16 +445,21 @@ impl Device {
                     socket2::Socket::from_raw_fd(self.config.udp_fd)
                 };
                 udp_sock.set_nonblocking(true)?;
-                let local_addr = udp_sock.local_addr()?;
-                port = local_addr
-                    .as_socket()
-                    .ok_or_else(|| Error::GetSockName("Invalid socket address".to_string()))?
-                    .port();
 
-                self.register_udp_handler(udp_sock.try_clone().unwrap())?;
-                self.udp4 = Some(udp_sock);
-                // For IPv6, we would need a separate socket; for now assume the inherited socket works for both
-                self.udp6 = None;
+                // If port wasn't explicitly provided, try to detect it
+                if self.config.listen_port.is_none() {
+                    let local_addr = udp_sock.local_addr()?;
+                    port = local_addr
+                        .as_socket()
+                        .ok_or_else(|| Error::GetSockName("Invalid socket address".to_string()))?
+                        .port();
+                }
+
+                let arc_sock = Arc::new(udp_sock);
+                self.register_udp_handler(Arc::clone(&arc_sock))?;
+                self.udp4 = Some(Arc::clone(&arc_sock));
+                // Inherited socket is assumed to be dual-stack
+                self.udp6 = Some(arc_sock);
 
                 self.listen_port = port;
                 return Ok(());
@@ -469,15 +481,23 @@ impl Device {
                 .port();
         }
 
-        let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-        udp_sock6.set_reuse_address(true)?;
-        udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
-        udp_sock6.set_nonblocking(true)?;
+        let arc_sock4 = Arc::new(udp_sock4);
+        self.register_udp_handler(Arc::clone(&arc_sock4))?;
+        self.udp4 = Some(arc_sock4);
 
-        self.register_udp_handler(udp_sock4.try_clone().unwrap())?;
-        self.register_udp_handler(udp_sock6.try_clone().unwrap())?;
-        self.udp4 = Some(udp_sock4);
-        self.udp6 = Some(udp_sock6);
+        let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP));
+        if let Ok(udp_sock6) = udp_sock6 {
+            if udp_sock6.set_reuse_address(true).is_ok()
+                && udp_sock6
+                    .bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())
+                    .is_ok()
+                && udp_sock6.set_nonblocking(true).is_ok()
+            {
+                let arc_sock6 = Arc::new(udp_sock6);
+                self.register_udp_handler(Arc::clone(&arc_sock6))?;
+                self.udp6 = Some(arc_sock6);
+            }
+        }
 
         self.listen_port = port;
 
@@ -623,15 +643,24 @@ impl Device {
             .stop_notification(self.yield_notice.as_ref().unwrap())
     }
 
-    fn register_udp_handler(&self, udp: socket2::Socket) -> Result<(), Error> {
+    fn register_udp_handler(&self, udp: Arc<socket2::Socket>) -> Result<(), Error> {
         self.queue.new_event(
             udp.as_raw_fd(),
             Box::new(move |d, t| {
                 // Handler that handles anonymous packets over UDP
                 let mut iter = MAX_ITR;
-                let (private_key, public_key) = d.key_pair.as_ref().expect("Key not set");
 
-                let rate_limiter = d.rate_limiter.as_ref().unwrap();
+                // Gracefully skip if key pair is not yet set (Silent-Until-Configured)
+                let (private_key, public_key) = match d.key_pair.as_ref() {
+                    Some(kp) => kp,
+                    None => return Action::Continue,
+                };
+
+                // Gracefully skip if rate limiter is not yet set
+                let rate_limiter = match d.rate_limiter.as_ref() {
+                    Some(rl) => rl,
+                    None => return Action::Continue,
+                };
 
                 // Loop while we have packets on the anonymous connection
 
@@ -639,34 +668,52 @@ impl Device {
                 // bytes to the buffer, so this casting is safe.
                 let src_buf =
                     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-                while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
-                    let packet = &t.src_buf[..packet_len];
-                    // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
-                    let parsed_packet = match rate_limiter.verify_packet(
-                        Some(addr.as_socket().unwrap().ip()),
-                        packet,
-                        &mut t.dst_buf,
-                    ) {
-                        Ok(packet) => packet,
-                        Err(TunnResult::WriteToNetwork(cookie)) => {
-                            let _: Result<_, _> = udp.send_to(cookie, &addr);
-                            continue;
-                        }
-                        Err(_) => continue,
+                    while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
+                        let packet = &t.src_buf[..packet_len];
+                        tracing::debug!(
+                            "Received UDP packet from {:?} length {}",
+                            addr,
+                            packet_len
+                        );
+                        // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
+                        let parsed_packet = match addr.as_socket() {
+
+                        Some(sock_addr) => match rate_limiter.verify_packet(
+                            Some(sock_addr.ip()),
+                            packet,
+                            &mut t.dst_buf,
+                        ) {
+                            Ok(packet) => packet,
+                            Err(TunnResult::WriteToNetwork(cookie)) => {
+                                let _: Result<_, _> = udp.send_to(cookie, &addr);
+                                continue;
+                            }
+                            Err(_) => continue,
+                        },
+                        None => continue,
                     };
 
-                    let peer = match &parsed_packet {
-                        Packet::HandshakeInit(p) => {
-                            parse_handshake_anon(private_key, public_key, p)
-                                .ok()
-                                .and_then(|hh| {
-                                    d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
-                                })
-                        }
-                        Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                        Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                        Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                    };
+                     let peer = match &parsed_packet {
+                         Packet::HandshakeInit(p) => {
+                             let result = parse_handshake_anon(private_key, public_key, p)
+                                 .ok()
+                                 .and_then(|hh| {
+                                     let pub_key = x25519::PublicKey::from(hh.peer_static_public);
+                                     tracing::debug!("HandshakeInit received. Client public key: {:?}", pub_key);
+                                     d.peers.get(&pub_key)
+                                 });
+                             if result.is_none() {
+                                 tracing::debug!("Peer lookup failed for HandshakeInit from {:?}", addr);
+                             } else {
+                                 tracing::debug!("Peer lookup successful for HandshakeInit from {:?}", addr);
+                             }
+                             result
+                         }
+                         Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                         Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                         Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                     };
+
 
                     let peer = match peer {
                         None => continue,
@@ -709,13 +756,13 @@ impl Device {
                     }
 
                     // This packet was OK, that means we want to create a connected socket for this peer
-                    let addr = addr.as_socket().unwrap();
-                    let ip_addr = addr.ip();
-                    p.set_endpoint(addr);
-                    if d.config.use_connected_socket {
-                        if let Ok(sock) = p.connect_endpoint(d.listen_port, d.fwmark) {
-                            d.register_conn_handler(Arc::clone(peer), sock, ip_addr)
-                                .unwrap();
+                    if let Some(sock_addr) = addr.as_socket() {
+                        let ip_addr = sock_addr.ip();
+                        p.set_endpoint(sock_addr);
+                        if d.config.use_connected_socket {
+                            if let Ok(sock) = p.connect_endpoint(d.listen_port, d.fwmark) {
+                                let _ = d.register_conn_handler(Arc::clone(peer), sock, ip_addr);
+                            }
                         }
                     }
 
@@ -808,8 +855,13 @@ impl Device {
                 // * Send encapsulated packet to the peer's endpoint
                 let mtu = d.mtu.load(Ordering::Relaxed);
 
-                let udp4 = d.udp4.as_ref().expect("Not connected");
-                let udp6 = d.udp6.as_ref().expect("Not connected");
+                let udp4 = d.udp4.as_ref();
+                let udp6 = d.udp6.as_ref();
+
+                if udp4.is_none() && udp6.is_none() {
+                    tracing::error!("No UDP sockets initialized");
+                    return Action::Exit;
+                }
 
                 let peers = &d.peers_by_ip;
                 for _ in 0..MAX_ITR {
@@ -850,9 +902,13 @@ impl Device {
                                 // Prefer to send using the connected socket
                                 let _: Result<_, _> = conn.write(packet);
                             } else if let Some(addr @ SocketAddr::V4(_)) = endpoint.addr {
-                                let _: Result<_, _> = udp4.send_to(packet, &addr.into());
+                                if let Some(udp4) = udp4 {
+                                    let _: Result<_, _> = udp4.send_to(packet, &addr.into());
+                                }
                             } else if let Some(addr @ SocketAddr::V6(_)) = endpoint.addr {
-                                let _: Result<_, _> = udp6.send_to(packet, &addr.into());
+                                if let Some(udp6) = udp6 {
+                                    let _: Result<_, _> = udp6.send_to(packet, &addr.into());
+                                }
                             } else {
                                 tracing::error!("No endpoint");
                             }
